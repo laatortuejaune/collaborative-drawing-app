@@ -32,31 +32,51 @@ function App() {
   const prevPos = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
-    // Use environment variable with fallback to Render backend
-    const backendUrl = import.meta.env.REACT_APP_BACKEND_URL || 'https://collaborative-drawing-app-backend-wz3c.onrender.com';
-    const newSocket = io(backendUrl);
-    setSocket(newSocket);
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://collaborative-drawing-app-backend-wz3c.onrender.com';
+    const newSocket = io(backendUrl, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      timeout: 10000,
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Connected to backend:', backendUrl);
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('Connection error:', error);
+    });
 
     newSocket.on('draw', (data: DrawData) => {
-      drawLine(data.prevX, data.prevY, data.x, data.y, data.color, data.size, data.tool);
+      drawOnCanvas(data);
     });
 
-    newSocket.on('cursor', (data: CursorData) => {
-      setCursors(prev => new Map(prev).set(data.id, data));
+    newSocket.on('cursor-move', (data: CursorData) => {
+      setCursors((prev) => {
+        const updated = new Map(prev);
+        updated.set(data.id, { x: data.x, y: data.y });
+        return updated;
+      });
     });
+
+    newSocket.on('clear-canvas', () => {
+      clearCanvas();
+    });
+
+    setSocket(newSocket);
 
     return () => {
-      newSocket.close();
+      newSocket.disconnect();
     };
   }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
+
     canvas.width = window.innerWidth - 300;
     canvas.height = window.innerHeight;
-    
+
     const ctx = canvas.getContext('2d');
     if (ctx) {
       ctx.fillStyle = 'white';
@@ -67,52 +87,40 @@ function App() {
 
   const saveToHistory = () => {
     const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (!ctx || !canvas) return;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const newHistory = history.slice(0, historyStep + 1);
-    newHistory.push(imageData);
-    setHistory(newHistory);
-    setHistoryStep(newHistory.length - 1);
+    setHistory((prev) => [...prev.slice(0, historyStep + 1), imageData]);
+    setHistoryStep((prev) => prev + 1);
   };
 
   const undo = () => {
     if (historyStep > 0) {
       const canvas = canvasRef.current;
-      const ctx = canvas?.getContext('2d');
-      if (!ctx || !canvas) return;
+      if (!canvas) return;
 
-      const newStep = historyStep - 1;
-      ctx.putImageData(history[newStep], 0, 0);
-      setHistoryStep(newStep);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      setHistoryStep((prev) => prev - 1);
+      ctx.putImageData(history[historyStep - 1], 0, 0);
     }
   };
 
   const redo = () => {
     if (historyStep < history.length - 1) {
       const canvas = canvasRef.current;
-      const ctx = canvas?.getContext('2d');
-      if (!ctx || !canvas) return;
+      if (!canvas) return;
 
-      const newStep = historyStep + 1;
-      ctx.putImageData(history[newStep], 0, 0);
-      setHistoryStep(newStep);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      setHistoryStep((prev) => prev + 1);
+      ctx.putImageData(history[historyStep + 1], 0, 0);
     }
-  };
-
-  const drawLine = (x1: number, y1: number, x2: number, y2: number, strokeColor: string, strokeSize: number, strokeTool: Tool) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d');
-    if (!ctx) return;
-
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.strokeStyle = strokeTool === 'eraser' ? 'white' : strokeColor;
-    ctx.lineWidth = strokeSize;
-    ctx.lineCap = 'round';
-    ctx.stroke();
   };
 
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -120,11 +128,11 @@ function App() {
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
+    prevPos.current = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
     setIsDrawing(true);
-    prevPos.current = { x, y };
   };
 
   const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -137,18 +145,20 @@ function App() {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    drawLine(prevPos.current.x, prevPos.current.y, x, y, color, brushSize, tool);
+    const drawData: DrawData = {
+      x,
+      y,
+      prevX: prevPos.current.x,
+      prevY: prevPos.current.y,
+      color: tool === 'eraser' ? '#FFFFFF' : color,
+      size: brushSize,
+      tool,
+    };
+
+    drawOnCanvas(drawData);
 
     if (socket) {
-      socket.emit('draw', {
-        x,
-        y,
-        prevX: prevPos.current.x,
-        prevY: prevPos.current.y,
-        color,
-        size: brushSize,
-        tool,
-      });
+      socket.emit('draw', drawData);
     }
 
     prevPos.current = { x, y };
@@ -161,30 +171,65 @@ function App() {
     }
   };
 
+  const drawOnCanvas = (data: DrawData) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.beginPath();
+    ctx.moveTo(data.prevX, data.prevY);
+    ctx.lineTo(data.x, data.y);
+    ctx.strokeStyle = data.color;
+    ctx.lineWidth = data.size;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  };
+
+  const clearCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  };
+
+  const handleClear = () => {
+    clearCanvas();
+    saveToHistory();
+    if (socket) {
+      socket.emit('clear-canvas');
+    }
+  };
+
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !socket) return;
+    if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    socket.emit('cursor', { x, y });
+    if (socket) {
+      socket.emit('cursor-move', { x, y });
+    }
   };
 
   return (
     <div className="flex h-screen bg-gray-100">
-      {/* Toolbar */}
       <div className="w-72 bg-white shadow-lg p-6 flex flex-col gap-6">
-        <h1 className="text-2xl font-bold text-gray-800">Drawing App</h1>
-        
-        {/* Tools */}
+        <h1 className="text-3xl font-bold text-gray-800">Drawing App</h1>
+
         <div className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold text-gray-600">TOOLS</h2>
+          <label className="text-sm font-semibold text-gray-600">TOOL</label>
           <div className="flex gap-2">
             <button
               onClick={() => setTool('brush')}
-              className={`px-4 py-2 rounded-lg font-medium transition ${
+              className={`flex-1 px-4 py-2 rounded-lg font-medium transition ${
                 tool === 'brush'
                   ? 'bg-blue-500 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
@@ -194,7 +239,7 @@ function App() {
             </button>
             <button
               onClick={() => setTool('eraser')}
-              className={`px-4 py-2 rounded-lg font-medium transition ${
+              className={`flex-1 px-4 py-2 rounded-lg font-medium transition ${
                 tool === 'eraser'
                   ? 'bg-blue-500 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
@@ -205,20 +250,21 @@ function App() {
           </div>
         </div>
 
-        {/* Color Picker */}
         <div className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold text-gray-600">COLOR</h2>
+          <label className="text-sm font-semibold text-gray-600">COLOR</label>
           <input
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            className="w-full h-12 rounded-lg cursor-pointer"
+            disabled={tool === 'eraser'}
+            className="w-full h-12 rounded-lg cursor-pointer border-2 border-gray-300"
           />
         </div>
 
-        {/* Brush Size */}
         <div className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold text-gray-600">BRUSH SIZE: {brushSize}px</h2>
+          <label className="text-sm font-semibold text-gray-600">
+            BRUSH SIZE: {brushSize}px
+          </label>
           <input
             type="range"
             min="1"
@@ -229,35 +275,36 @@ function App() {
           />
         </div>
 
-        {/* Undo/Redo */}
-        <div className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold text-gray-600">HISTORY</h2>
-          <div className="flex gap-2">
-            <button
-              onClick={undo}
-              disabled={historyStep <= 0}
-              className="flex-1 px-4 py-2 rounded-lg font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Undo
-            </button>
-            <button
-              onClick={redo}
-              disabled={historyStep >= history.length - 1}
-              className="flex-1 px-4 py-2 rounded-lg font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Redo
-            </button>
-          </div>
+        <button
+          onClick={handleClear}
+          className="px-4 py-2 rounded-lg font-medium bg-red-500 text-white hover:bg-red-600 transition"
+        >
+          Clear Canvas
+        </button>
+
+        <div className="flex gap-2">
+          <button
+            onClick={undo}
+            disabled={historyStep <= 0}
+            className="flex-1 px-4 py-2 rounded-lg font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Undo
+          </button>
+          <button
+            onClick={redo}
+            disabled={historyStep >= history.length - 1}
+            className="flex-1 px-4 py-2 rounded-lg font-medium bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Redo
+          </button>
         </div>
 
-        {/* Predefined Drawings */}
         <div className="flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-gray-600">TEMPLATES</h2>
           <p className="text-xs text-gray-500">Load predefined drawings from /public/drawings</p>
         </div>
       </div>
 
-      {/* Canvas */}
       <div className="flex-1 relative">
         <canvas
           ref={canvasRef}
@@ -269,14 +316,13 @@ function App() {
           onMouseUp={stopDrawing}
           onMouseLeave={stopDrawing}
           className="cursor-crosshair bg-white"
-        />
-        {/* Remote cursors */}
+        ></canvas>
         {Array.from(cursors.entries()).map(([id, cursor]) => (
           <div
             key={id}
             className="absolute w-4 h-4 bg-red-500 rounded-full pointer-events-none"
             style={{ left: cursor.x, top: cursor.y }}
-          />
+          ></div>
         ))}
       </div>
     </div>
