@@ -31,8 +31,10 @@ function App() {
   const [cursors, setCursors] = useState<Map<string, CursorData>>(new Map());
   const prevPos = useRef({ x: 0, y: 0 });
 
-  useEffect(() {
-    const newSocket = io('http://localhost:5000');
+  useEffect(() => {
+    // Use environment variable with fallback to Render backend
+    const backendUrl = import.meta.env.REACT_APP_BACKEND_URL || 'https://collaborative-drawing-app-backend-wz3c.onrender.com';
+    const newSocket = io(backendUrl);
     setSocket(newSocket);
 
     newSocket.on('draw', (data: DrawData) => {
